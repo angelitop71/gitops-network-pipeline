@@ -7,8 +7,8 @@
     # La imagen base es Debian minima: se instala Python antes que nada
     - name: Bootstrap de Python (modulo raw, no requiere Python)
       ansible.builtin.raw: >
-        test -x /usr/bin/python3 && dpkg -s python3-apt >/dev/null 2>&1 ||
-        (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 python3-apt)
+        test -x /usr/bin/python3 && dpkg -s python3-apt >/dev/null 2>&1 && command -v ip >/dev/null ||
+        (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3 python3-apt iproute2)
       changed_when: false
 
     - name: Recolectar facts

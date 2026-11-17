@@ -15,7 +15,7 @@
   <p>Red creada con <b>OpenTofu</b>, servidor configurado con <b>Ansible</b>, desplegado por <b>GitHub Actions</b>.</p>
   <table>
     <tr><td>Servidor</td><td><code>{{ ansible_hostname }}</code></td></tr>
-    <tr><td>IPs (DMZ / backend)</td><td>{% for ip in ansible_all_ipv4_addresses | sort %}<code>{{ ip }}</code> {% endfor %}</td></tr>
+    <tr><td>IPs (DMZ / backend)</td><td>{% for ip in ansible_facts.all_ipv4_addresses | default([]) | sort %}<code>{{ ip }}</code> {% endfor %}</td></tr>
     <tr><td>Commit desplegado</td><td><code>{{ git_sha }}</code></td></tr>
     <tr><td>Reglas de firewall</td><td>{% for r in firewall_rules %}<code>{{ r.name }}: {{ r.port }}/tcp desde {{ r.source }}</code><br>{% endfor %}</td></tr>
     <tr><td>DB en red backend</td><td>{% if db_check.rc == 0 %}<span class="ok">alcanzable (solo desde servidores)</span>{% else %}<span class="no">no alcanzable</span>{% endif %}</td></tr>
