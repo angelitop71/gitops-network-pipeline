@@ -3,23 +3,17 @@ variable "project" {
   type        = string
 }
 
-variable "region" {
-  description = "Region de AWS"
-  type        = string
-  default     = "us-east-1"
-}
-
-variable "vpc_cidr" {
-  description = "Bloque CIDR de la VPC"
-  type        = string
-}
-
-variable "subnets" {
-  description = "Subredes publicas de la topologia (nombre => cidr + zona)"
+variable "networks" {
+  description = "Segmentos de red. Deben existir 'dmz' y 'backend'. internal = true => sin salida a Internet"
   type = map(object({
-    cidr = string
-    az   = string
+    subnet   = string
+    internal = bool
   }))
+
+  validation {
+    condition     = contains(keys(var.networks), "dmz") && contains(keys(var.networks), "backend")
+    error_message = "Se requieren las redes 'dmz' y 'backend'."
+  }
 }
 
 variable "web_count" {
@@ -28,23 +22,22 @@ variable "web_count" {
   default     = 2
 }
 
-variable "instance_type" {
-  description = "Tipo de instancia EC2"
-  type        = string
-  default     = "t3.micro"
-}
-
-variable "web_ingress_rules" {
-  description = "Reglas de entrada del Security Group web (nombre => puerto + origen)"
+variable "firewall_rules" {
+  description = <<-EOT
+    Reglas de seguridad de entrada para los servidores web.
+    port      = puerto del servicio dentro del servidor (iptables lo permite)
+    host_port = puerto publicado en el host para web-1 (web-2 usa host_port+1, etc.)
+    source    = red de origen permitida (CIDR)
+  EOT
   type = map(object({
-    port        = number
-    protocol    = optional(string, "tcp")
-    cidr        = string
-    description = string
+    port      = number
+    host_port = number
+    source    = string
   }))
 }
 
-variable "ssh_public_key" {
-  description = "Llave publica SSH que usara Ansible (viene de un secret de GitHub)"
+variable "base_image" {
+  description = "Imagen base de los servidores web (Debian minimo; Ansible instala el resto)"
   type        = string
+  default     = "debian:bookworm-slim"
 }

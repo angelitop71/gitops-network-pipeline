@@ -1,8 +1,9 @@
-# Valores por defecto. El pipeline sobreescribe firewall_allowed_ports
-# con la salida "open_ports" de OpenTofu, asi el firewall del host (UFW)
-# queda siempre igual al Security Group (defensa en profundidad).
-firewall_allowed_ports:
-  - 22
-  - 80
+# Valores por defecto. El pipeline sobreescribe firewall_rules con la
+# salida de OpenTofu, asi Docker (puertos publicados) e iptables
+# siempre usan la MISMA definicion de reglas.
+firewall_rules:
+  - name: http
+    port: 80
+    source: 0.0.0.0/0
 
 git_sha: "local"

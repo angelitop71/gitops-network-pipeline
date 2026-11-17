@@ -1,108 +1,89 @@
 # ---------------------------------------------------------------
-# Topologia de red
+# Topologia de red (segmentacion)
+#   dmz     : red expuesta, con salida a Internet
+#   backend : red interna aislada (internal = true), solo servidores
 # ---------------------------------------------------------------
-resource "aws_vpc" "main" {
-  cidr_block           = var.vpc_cidr
-  enable_dns_support   = true
-  enable_dns_hostnames = true
+resource "docker_network" "net" {
+  for_each = var.networks
 
-  tags = { Name = "${var.project}-vpc" }
-}
+  name     = "${var.project}-${each.key}"
+  driver   = "bridge"
+  internal = each.value.internal
 
-resource "aws_internet_gateway" "igw" {
-  vpc_id = aws_vpc.main.id
-  tags   = { Name = "${var.project}-igw" }
-}
-
-resource "aws_subnet" "public" {
-  for_each = var.subnets
-
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = each.value.cidr
-  availability_zone       = each.value.az
-  map_public_ip_on_launch = true
-
-  tags = { Name = "${var.project}-${each.key}" }
-}
-
-resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.main.id
-
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.igw.id
+  ipam_config {
+    subnet = each.value.subnet
   }
 
-  tags = { Name = "${var.project}-rt-publica" }
-}
-
-resource "aws_route_table_association" "public" {
-  for_each       = aws_subnet.public
-  subnet_id      = each.value.id
-  route_table_id = aws_route_table.public.id
-}
-
-# ---------------------------------------------------------------
-# Reglas de seguridad (definidas 100% en terraform.tfvars)
-# ---------------------------------------------------------------
-resource "aws_security_group" "web" {
-  name        = "${var.project}-sg-web"
-  description = "Reglas de seguridad para servidores web (GitOps)"
-  vpc_id      = aws_vpc.main.id
-  tags        = { Name = "${var.project}-sg-web" }
-}
-
-resource "aws_vpc_security_group_ingress_rule" "web" {
-  for_each = var.web_ingress_rules
-
-  security_group_id = aws_security_group.web.id
-  description       = each.value.description
-  ip_protocol       = each.value.protocol
-  from_port         = each.value.port
-  to_port           = each.value.port
-  cidr_ipv4         = each.value.cidr
-
-  tags = { Name = each.key }
-}
-
-resource "aws_vpc_security_group_egress_rule" "all" {
-  security_group_id = aws_security_group.web.id
-  description       = "Salida a Internet (apt, etc.)"
-  ip_protocol       = "-1"
-  cidr_ipv4         = "0.0.0.0/0"
-}
-
-# ---------------------------------------------------------------
-# Servidores
-# ---------------------------------------------------------------
-data "aws_ami" "ubuntu" {
-  most_recent = true
-  owners      = ["099720109477"] # Canonical
-
-  filter {
-    name   = "name"
-    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"]
+  labels {
+    label = "managed-by"
+    value = "opentofu-gitops"
   }
 }
 
-resource "aws_key_pair" "ansible" {
-  key_name   = "${var.project}-ansible"
-  public_key = var.ssh_public_key
+# ---------------------------------------------------------------
+# Imagenes
+# ---------------------------------------------------------------
+resource "docker_image" "base" {
+  name         = var.base_image
+  keep_locally = true
 }
 
-locals {
-  subnet_ids = [for k in sort(keys(aws_subnet.public)) : aws_subnet.public[k].id]
+resource "docker_image" "db" {
+  name         = "redis:7-alpine"
+  keep_locally = true
 }
 
-resource "aws_instance" "web" {
+# ---------------------------------------------------------------
+# Base de datos: SOLO en la red backend, sin puertos publicados
+# => inalcanzable desde el host / Internet
+# ---------------------------------------------------------------
+resource "docker_container" "db" {
+  name     = "${var.project}-db"
+  hostname = "db"
+  image    = docker_image.db.image_id
+  restart  = "unless-stopped"
+
+  networks_advanced {
+    name    = docker_network.net["backend"].name
+    aliases = ["db"]
+  }
+}
+
+# ---------------------------------------------------------------
+# Servidores web: en dmz + backend. Los puertos publicados salen
+# de var.firewall_rules (la misma fuente que usa iptables).
+# ---------------------------------------------------------------
+resource "docker_container" "web" {
   count = var.web_count
 
-  ami                    = data.aws_ami.ubuntu.id
-  instance_type          = var.instance_type
-  key_name               = aws_key_pair.ansible.key_name
-  vpc_security_group_ids = [aws_security_group.web.id]
-  # reparte los servidores entre las subredes (alta disponibilidad basica)
-  subnet_id = local.subnet_ids[count.index % length(local.subnet_ids)]
+  name     = "${var.project}-web-${count.index + 1}"
+  hostname = "web-${count.index + 1}"
+  image    = docker_image.base.image_id
+  command  = ["sleep", "infinity"] # Ansible instala y levanta los servicios
+  restart  = "unless-stopped"
 
-  tags = { Name = "${var.project}-web-${count.index + 1}", Role = "web" }
+  capabilities {
+    add = ["NET_ADMIN"] # necesario para que Ansible configure iptables
+  }
+
+  networks_advanced {
+    name = docker_network.net["dmz"].name
+  }
+
+  networks_advanced {
+    name = docker_network.net["backend"].name
+  }
+
+  dynamic "ports" {
+    for_each = var.firewall_rules
+    content {
+      internal = ports.value.port
+      external = ports.value.host_port + count.index
+    }
+  }
+
+  labels {
+    label = "role"
+    value = "web"
+  }
 }

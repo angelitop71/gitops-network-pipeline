@@ -25,11 +25,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-  AWS_REGION: us-east-1
-  TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
   TF_IN_AUTOMATION: "true"
+  ANSIBLE_FORCE_COLOR: "1"
 
 jobs:
   # ------------------------------------------------------------
@@ -37,13 +34,12 @@ jobs:
   # ------------------------------------------------------------
   plan:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     defaults:
       run:
         working-directory: infra
     steps:
       - uses: actions/checkout@v4
-      - uses: opentofu/setup-opentofu@v1
 
       - name: Formato
         run: tofu fmt -check -recursive
@@ -55,7 +51,6 @@ jobs:
         run: tofu validate
 
       - name: Plan
-        id: plan
         run: |
           tofu plan -input=false -no-color -out=tfplan
           tofu show -no-color tfplan > plan.txt
@@ -77,8 +72,7 @@ jobs:
       - name: Chequeo de sintaxis Ansible
         working-directory: ansible
         run: |
-          pipx install --include-deps ansible
-          echo "[web]" > inventory.ini
+          printf '[web]\n' > inventory.ini
           ansible-playbook playbook.yml --syntax-check
 
   # ------------------------------------------------------------
@@ -86,13 +80,9 @@ jobs:
   # ------------------------------------------------------------
   deploy:
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
-    runs-on: ubuntu-latest
-    environment: produccion # opcional: activar "required reviewers" en GitHub
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-      - uses: opentofu/setup-opentofu@v1
-        with:
-          tofu_wrapper: false # para leer outputs limpios
 
       - name: OpenTofu apply
         working-directory: infra
@@ -100,69 +90,64 @@ jobs:
           tofu init -input=false
           tofu apply -input=false -auto-approve
           tofu output -raw ansible_inventory > ../ansible/inventory.ini
-          tofu output -json open_ports > ../ansible/open_ports.json
-          tofu output -json web_public_ips > ../web_ips.json
-          cat ../ansible/inventory.ini
+          tofu output -json firewall_rules > ../ansible/firewall_rules.json
+          tofu output -json web_urls > ../web_urls.json
+          echo "--- Inventario generado ---"; cat ../ansible/inventory.ini
 
       - name: Guardar estado en el repositorio
         if: always()
         run: |
           git config user.name "gitops-bot"
           git config user.email "gitops-bot@users.noreply.github.com"
-          git add infra/terraform.tfstate || true
+          if [ -f infra/terraform.tfstate ]; then git add infra/terraform.tfstate; fi
           git diff --cached --quiet || git commit -m "chore: actualizar estado OpenTofu [skip ci]"
           git pull --rebase origin main && git push origin HEAD:main
-
-      - name: Preparar llave SSH
-        run: |
-          install -m 700 -d ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-
-      - name: Instalar Ansible
-        run: pipx install --include-deps ansible
 
       - name: Ansible playbook
         working-directory: ansible
         run: |
           ansible-playbook playbook.yml \
-            -e "{\"firewall_allowed_ports\": $(cat open_ports.json)}" \
+            -e "{\"firewall_rules\": $(cat firewall_rules.json)}" \
             -e "git_sha=${GITHUB_SHA::7}"
 
       - name: Smoke test
         run: |
-          for ip in $(jq -r '.[]' web_ips.json); do
-            echo "Probando http://$ip ..."
-            curl -fsS --retry 5 --retry-delay 5 "http://$ip" | grep -q "GitOps Network Pipeline"
-            echo "OK $ip"
+          for url in $(jq -r '.[]' web_urls.json); do
+            echo "Probando $url ..."
+            curl -fsS --retry 5 --retry-delay 2 "$url" | grep -q "GitOps Network Pipeline"
+            echo "OK $url"
           done
+          echo "Probando que la DB NO es accesible desde el host..."
+          if timeout 3 bash -c '</dev/tcp/localhost/6379' 2>/dev/null; then
+            echo "ERROR: el puerto 6379 esta expuesto"; exit 1
+          fi
+          echo "OK: DB aislada en la red backend"
 
       - name: Resumen
         run: |
           echo "## Despliegue OK (commit ${GITHUB_SHA::7})" >> $GITHUB_STEP_SUMMARY
-          for ip in $(jq -r '.[]' web_ips.json); do echo "- http://$ip" >> $GITHUB_STEP_SUMMARY; done
+          for url in $(jq -r '.[]' web_urls.json); do echo "- $url" >> $GITHUB_STEP_SUMMARY; done
 
   # ------------------------------------------------------------
-  # 3) Manual: destruir todo (para no gastar creditos)
+  # 3) Manual: destruir todo
   # ------------------------------------------------------------
   destroy:
     if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: infra
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
-      - uses: opentofu/setup-opentofu@v1
-      - run: tofu init -input=false
-      - run: tofu destroy -input=false -auto-approve
+
+      - name: OpenTofu destroy
+        working-directory: infra
+        run: |
+          tofu init -input=false
+          tofu destroy -input=false -auto-approve
 
       - name: Guardar estado en el repositorio
         if: always()
-        working-directory: .
         run: |
           git config user.name "gitops-bot"
           git config user.email "gitops-bot@users.noreply.github.com"
-          git add infra/terraform.tfstate || true
+          if [ -f infra/terraform.tfstate ]; then git add infra/terraform.tfstate; fi
           git diff --cached --quiet || git commit -m "chore: estado tras destroy [skip ci]"
           git pull --rebase origin main && git push origin HEAD:main

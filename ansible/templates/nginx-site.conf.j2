@@ -1,0 +1,11 @@
+# Generado por Ansible (GitOps) - no editar a mano
+{% for rule in firewall_rules %}
+server {
+    # regla: {{ rule.name }}
+    listen {{ rule.port }}{{ ' default_server' if loop.first else '' }};
+    root /var/www/html;
+    index index.html;
+    add_header X-Served-By {{ ansible_hostname }};
+    add_header X-Rule {{ rule.name }};
+}
+{% endfor %}

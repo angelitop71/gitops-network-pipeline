@@ -1,0 +1,7 @@
+[web]
+%{ for i in web ~}
+${i.tags.Name} ansible_host=${i.public_ip} private_ip=${i.private_ip}
+%{ endfor ~}
+
+[web:vars]
+ansible_user=ubuntu

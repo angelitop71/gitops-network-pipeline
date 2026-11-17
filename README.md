@@ -1,83 +1,94 @@
 # GitOps Network Pipeline: Infraestructura de Red como Código
 
-Proyecto TEL-342 — toda la topología de red y las reglas de seguridad se definen en código
-(OpenTofu) y se despliegan/configuran automáticamente (Ansible) en cada push o merge a `main`
+Proyecto TEL-342. Toda la topología de red y las reglas de seguridad se definen en código
+(OpenTofu) y se despliegan y configuran automáticamente (Ansible) en cada push o merge a `main`
 mediante GitHub Actions.
 
 ## Arquitectura
 
 ```
- Desarrollador ── git push / PR ──► GitHub ──► GitHub Actions
-                                                 │
-                     PR:   fmt → validate → plan → comentario en el PR
-                     main: apply ──► AWS (VPC, subredes, IGW, rutas, Security Group, EC2)
-                                  └► inventario ──► Ansible (nginx, UFW, hardening SSH)
-                                                  └► smoke test (curl)
-          Estado de OpenTofu: infra/terraform.tfstate versionado en el repo (lo commitea el pipeline)
+ Desarrollador ── git push / PR ──► GitHub ──► GitHub Actions ──► runner self-hosted (servidor Ubuntu)
+                                                                    │
+     PR:   fmt → validate → plan → comentario automático en el PR    │
+     main: tofu apply ──► Docker: redes + contenedores               │
+           └► inventario ──► Ansible: nginx + iptables               │
+           └► smoke test (web responde / DB no expuesta)             │
+     Estado OpenTofu: infra/terraform.tfstate versionado en el repo
+
+        Internet/host ──► :8001 ─► [web-1] ─┐
+                      ──► :8002 ─► [web-2] ─┤  red DMZ 172.30.10.0/24
+                                            │
+                                  [db redis]┘  red BACKEND 172.30.20.0/24 (internal, aislada)
 ```
 
 | Capa | Qué define | Dónde |
 |---|---|---|
-| Topología | VPC 10.10.0.0/16, 2 subredes en 2 AZ, Internet Gateway, tabla de rutas | `infra/main.tf` + `infra/terraform.tfvars` |
-| Seguridad de red | Security Group con reglas generadas desde `web_ingress_rules` | `infra/terraform.tfvars` |
-| Seguridad de host | UFW con los **mismos** puertos que el SG + SSH sin password | `ansible/playbook.yml` |
-| Servicio | nginx con página que muestra host, IP, commit y puertos | `ansible/templates/index.html.j2` |
-| Pipeline | plan en PR, apply + Ansible + test en `main`, destroy manual | `.github/workflows/gitops.yml` |
+| Topología | Red DMZ + red backend aislada (`internal`), subredes | `infra/terraform.tfvars` → `networks` |
+| Seguridad de red | Puertos publicados; la DB no publica nada | `infra/terraform.tfvars` → `firewall_rules` |
+| Seguridad de host | iptables: política DROP + solo los puertos de `firewall_rules` | `ansible/playbook.yml` |
+| Servicio | nginx escuchando en cada puerto declarado | `ansible/templates/` |
+| Pipeline | plan en PR; apply + Ansible + test en `main`; destroy manual | `.github/workflows/gitops.yml` |
 
-## Puesta en marcha (una sola vez)
+Una sola definición (`firewall_rules`) alimenta los puertos de Docker **y** el firewall iptables
+(defensa en profundidad).
 
-1. **Crear el repo** en GitHub y subir esta carpeta.
-2. **Credenciales AWS** (cuenta normal o AWS Academy Learner Lab).
-   En Learner Lab: *AWS Details → AWS CLI* muestra `aws_access_key_id`, `aws_secret_access_key`
-   y `aws_session_token` (expiran cada ~4 h: actualizar los secrets antes de la demo).
-3. **Estado**: no se usa S3 (la cuenta lo bloquea por SCP). El pipeline guarda `infra/terraform.tfstate`
-   en el mismo repo tras cada apply/destroy, con `[skip ci]` para no relanzarse.
-4. **Llave SSH para Ansible**:
-   ```bash
-   ssh-keygen -t ed25519 -f gitops_key -N "" -C "gitops-ansible"
-   ```
-5. **Secrets del repo** (*Settings → Secrets and variables → Actions*):
+## Instalación en el servidor (una vez)
 
-   | Secret | Valor |
-   |---|---|
-   | `AWS_ACCESS_KEY_ID` | ... |
-   | `AWS_SECRET_ACCESS_KEY` | ... |
-   | `SSH_PUBLIC_KEY` | contenido de `gitops_key.pub` |
-   | `SSH_PRIVATE_KEY` | contenido de `gitops_key` |
+```bash
+sudo apt update
+sudo apt install -y docker.io ansible jq curl git
+sudo snap install --classic opentofu
+sudo usermod -aG docker $USER      # luego cerrar sesión y volver a entrar (o: newgrp docker)
+docker ps && tofu version && ansible --version
+```
 
-6. (Opcional) *Settings → Environments → `produccion`* → *Required reviewers*: obliga a aprobar
-   cada despliegue (control de cambios).
-7. Primer despliegue: *Actions → GitOps Network Pipeline → Run workflow → apply*.
+### Runner self-hosted de GitHub
+Repo → *Settings → Actions → Runners → New self-hosted runner → Linux x64*: copiar y ejecutar
+los comandos que muestra GitHub (download, `./config.sh ...`). Después dejar corriendo:
+
+```bash
+cd ~/actions-runner && ./run.sh
+```
+
+### Permiso para que el pipeline commitee el estado
+Repo → *Settings → Actions → General → Workflow permissions* → **Read and write permissions**.
+
+## Primer despliegue
+*Actions → GitOps Network Pipeline → Run workflow → apply*. Luego abrir `http://localhost:8001`.
 
 ## Guion de la demo (≈10 min)
 
-1. Mostrar el repo y `terraform.tfvars`: "la red completa está en este archivo".
-2. Abrir `http://<ip>` de un servidor → página con commit y puertos `22, 80`.
-3. Probar que el 8080 está cerrado: `nc -zv <ip> 8080` → timeout.
-4. Crear rama, descomentar la regla `app` (8080) en `terraform.tfvars`, abrir **Pull Request**.
-5. Mostrar el comentario automático con el **plan**: `+ aws_vpc_security_group_ingress_rule.web["app"]`.
-6. **Merge** → ver el job `deploy` en vivo: apply → Ansible abre 8080 en UFW → smoke test.
-7. Recargar la página: commit nuevo y puertos `22, 80, 8080`.
-8. (Extra) Cambiar algo a mano en la consola AWS y mostrar que el siguiente `plan` detecta el
-   *drift* y lo revierte → el repositorio es la única fuente de verdad.
-9. Al final: *Run workflow → destroy* (para no gastar créditos).
+1. Mostrar `infra/terraform.tfvars`: "la red completa y el firewall están en este archivo".
+2. `docker network ls` / `docker ps` → redes `gitops-net-dmz` y `gitops-net-backend`, 3 contenedores.
+3. Abrir `http://localhost:8001` y `:8002` → página con commit, reglas y "DB alcanzable (solo desde servidores)".
+4. Mostrar el aislamiento: `nc -zv localhost 6379` → falla (la DB no está expuesta).
+5. Mostrar el firewall: `docker exec gitops-net-web-1 iptables -L INPUT -n --line-numbers`.
+6. Crear rama, descomentar la regla `app` en `terraform.tfvars`, push y abrir **Pull Request**.
+7. Mostrar el comentario automático con el **plan** (los contenedores se recrean con el puerto 8080).
+8. **Merge** → ver el job `deploy` en vivo: apply → Ansible → smoke test.
+9. Abrir `http://localhost:9001` → nuevo servicio; la página muestra el commit nuevo y la regla `app`.
+10. (Extra, drift) `docker exec gitops-net-web-1 iptables -P INPUT ACCEPT` a mano → re-ejecutar el
+    pipeline → Ansible vuelve a poner DROP. Git es la única fuente de verdad.
 
-Otras ideas de cambio para la demo: `web_count = 3` (escalar), agregar una subred `publica-c`,
-restringir SSH a la IP de la universidad, cerrar el 80 y mostrar que la web deja de responder.
+Otras ideas: `web_count = 3` (escalar), cambiar `source` a `172.30.10.0/24` (solo DMZ),
+agregar una tercera red.
 
-## Pruebas locales (opcional)
-
+## Comandos locales útiles
 ```bash
-cd infra
-tofu init
-TF_VAR_ssh_public_key="$(cat ../gitops_key.pub)" tofu plan
+cd infra && tofu init && tofu plan          # ver qué cambiaría
+docker ps --filter label=role=web
+docker exec -it gitops-net-web-1 bash
 ```
 
-## Limitaciones conocidas (mencionar en el informe)
+## Alternativa cloud (`alternativa-aws/`)
+Diseño original para AWS (VPC, subredes en 2 AZ, Internet Gateway, Security Groups, EC2 + UFW).
+No se pudo usar porque la cuenta AWS disponible pertenece a una organización con una
+*Service Control Policy* que deniega explícitamente `ec2:CreateVpc`, `ec2:DescribeImages`,
+`s3:CreateBucket` y `ssm:GetParameter`. El flujo GitOps es idéntico; solo cambia el provider.
 
-- SSH abierto a `0.0.0.0/0` porque las IP de los runners de GitHub cambian. Mitigación: solo
-  autenticación por llave + UFW. Mejoras: AWS SSM Session Manager, runner self-hosted o bastion.
-- Estado en el repo: sin bloqueo concurrente (se mitiga con `concurrency` en el workflow) y en texto plano.
-  Mejora: backend S3 o cifrado de estado de OpenTofu (`encryption` con passphrase).
-- Credenciales estáticas en secrets. Mejora: OIDC de GitHub → rol IAM (no disponible en Learner Lab).
-- Subredes solo públicas (una privada requiere NAT Gateway, que tiene costo).
+## Limitaciones y mejoras (para el informe)
+- Estado en el repo: sin bloqueo (mitigado con `concurrency`) y sin cifrar. Mejora: backend remoto
+  (S3/HTTP) o cifrado de estado nativo de OpenTofu.
+- Contenedores en vez de VMs: misma lógica de red, menor aislamiento. Mejora: provider libvirt o cloud.
+- Al cambiar puertos, Docker recrea los contenedores (breve corte). Mejora: reverse proxy delante.
+- El runner self-hosted tiene acceso a Docker (equivale a root): usar en máquina dedicada.

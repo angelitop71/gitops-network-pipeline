@@ -4,7 +4,7 @@
 tfplan
 plan.txt
 ansible/inventory.ini
-ansible/open_ports.json
-web_ips.json
+ansible/firewall_rules.json
+web_urls.json
 gitops_key
 gitops_key.pub
