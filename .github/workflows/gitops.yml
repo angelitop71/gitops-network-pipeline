@@ -1,0 +1,168 @@
+name: GitOps Network Pipeline
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ["infra/**", "ansible/**", ".github/workflows/**"]
+  push:
+    branches: [main]
+    paths: ["infra/**", "ansible/**", ".github/workflows/**"]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Accion manual"
+        type: choice
+        options: [apply, destroy]
+        default: apply
+
+permissions:
+  contents: write # el pipeline commitea el estado de OpenTofu
+  pull-requests: write
+
+# nunca dos despliegues al mismo tiempo sobre la misma infraestructura
+concurrency:
+  group: gitops-network
+  cancel-in-progress: false
+
+env:
+  AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+  AWS_REGION: us-east-1
+  TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+  TF_IN_AUTOMATION: "true"
+
+jobs:
+  # ------------------------------------------------------------
+  # 1) En cada Pull Request: validar y mostrar el plan
+  # ------------------------------------------------------------
+  plan:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+      - uses: opentofu/setup-opentofu@v1
+
+      - name: Formato
+        run: tofu fmt -check -recursive
+
+      - name: Init
+        run: tofu init -input=false
+
+      - name: Validate
+        run: tofu validate
+
+      - name: Plan
+        id: plan
+        run: |
+          tofu plan -input=false -no-color -out=tfplan
+          tofu show -no-color tfplan > plan.txt
+
+      - name: Comentar el plan en el PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let plan = fs.readFileSync('infra/plan.txt', 'utf8');
+            if (plan.length > 60000) plan = plan.slice(0, 60000) + '\n... (recortado)';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: '### Plan de OpenTofu\n```hcl\n' + plan + '\n```'
+            });
+
+      - name: Chequeo de sintaxis Ansible
+        working-directory: ansible
+        run: |
+          pipx install --include-deps ansible
+          echo "[web]" > inventory.ini
+          ansible-playbook playbook.yml --syntax-check
+
+  # ------------------------------------------------------------
+  # 2) Al hacer merge/push a main: aplicar y configurar
+  # ------------------------------------------------------------
+  deploy:
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
+    runs-on: ubuntu-latest
+    environment: produccion # opcional: activar "required reviewers" en GitHub
+    steps:
+      - uses: actions/checkout@v4
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_wrapper: false # para leer outputs limpios
+
+      - name: OpenTofu apply
+        working-directory: infra
+        run: |
+          tofu init -input=false
+          tofu apply -input=false -auto-approve
+          tofu output -raw ansible_inventory > ../ansible/inventory.ini
+          tofu output -json open_ports > ../ansible/open_ports.json
+          tofu output -json web_public_ips > ../web_ips.json
+          cat ../ansible/inventory.ini
+
+      - name: Guardar estado en el repositorio
+        if: always()
+        run: |
+          git config user.name "gitops-bot"
+          git config user.email "gitops-bot@users.noreply.github.com"
+          git add infra/terraform.tfstate || true
+          git diff --cached --quiet || git commit -m "chore: actualizar estado OpenTofu [skip ci]"
+          git pull --rebase origin main && git push origin HEAD:main
+
+      - name: Preparar llave SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+      - name: Instalar Ansible
+        run: pipx install --include-deps ansible
+
+      - name: Ansible playbook
+        working-directory: ansible
+        run: |
+          ansible-playbook playbook.yml \
+            -e "{\"firewall_allowed_ports\": $(cat open_ports.json)}" \
+            -e "git_sha=${GITHUB_SHA::7}"
+
+      - name: Smoke test
+        run: |
+          for ip in $(jq -r '.[]' web_ips.json); do
+            echo "Probando http://$ip ..."
+            curl -fsS --retry 5 --retry-delay 5 "http://$ip" | grep -q "GitOps Network Pipeline"
+            echo "OK $ip"
+          done
+
+      - name: Resumen
+        run: |
+          echo "## Despliegue OK (commit ${GITHUB_SHA::7})" >> $GITHUB_STEP_SUMMARY
+          for ip in $(jq -r '.[]' web_ips.json); do echo "- http://$ip" >> $GITHUB_STEP_SUMMARY; done
+
+  # ------------------------------------------------------------
+  # 3) Manual: destruir todo (para no gastar creditos)
+  # ------------------------------------------------------------
+  destroy:
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'destroy'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v4
+      - uses: opentofu/setup-opentofu@v1
+      - run: tofu init -input=false
+      - run: tofu destroy -input=false -auto-approve
+
+      - name: Guardar estado en el repositorio
+        if: always()
+        working-directory: .
+        run: |
+          git config user.name "gitops-bot"
+          git config user.email "gitops-bot@users.noreply.github.com"
+          git add infra/terraform.tfstate || true
+          git diff --cached --quiet || git commit -m "chore: estado tras destroy [skip ci]"
+          git pull --rebase origin main && git push origin HEAD:main

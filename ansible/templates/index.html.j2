@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>GitOps Network Pipeline</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 3rem auto; padding: 0 1rem; }
+    td { padding: .3rem .8rem; border-bottom: 1px solid #ddd; }
+    code { background: #f2f2f2; padding: .1rem .3rem; }
+  </style>
+</head>
+<body>
+  <h1>GitOps Network Pipeline</h1>
+  <p>Servidor desplegado con <b>OpenTofu</b> y configurado con <b>Ansible</b> desde <b>GitHub Actions</b>.</p>
+  <table>
+    <tr><td>Host</td><td><code>{{ inventory_hostname }}</code></td></tr>
+    <tr><td>IP privada</td><td><code>{{ private_ip | default(ansible_default_ipv4.address) }}</code></td></tr>
+    <tr><td>Commit</td><td><code>{{ git_sha }}</code></td></tr>
+    <tr><td>Puertos abiertos</td><td><code>{{ firewall_allowed_ports | join(', ') }}</code></td></tr>
+    <tr><td>Fecha despliegue</td><td><code>{{ ansible_date_time.iso8601 }}</code></td></tr>
+  </table>
+</body>
+</html>

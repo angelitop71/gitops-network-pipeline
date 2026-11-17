@@ -1,0 +1,10 @@
+.terraform/
+# el estado principal SI se versiona (infra/terraform.tfstate); los respaldos no
+*.tfstate.backup
+tfplan
+plan.txt
+ansible/inventory.ini
+ansible/open_ports.json
+web_ips.json
+gitops_key
+gitops_key.pub

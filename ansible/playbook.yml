@@ -1,0 +1,71 @@
+---
+- name: Configurar servidores web desplegados por OpenTofu
+  hosts: web
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Esperar a que el servidor acepte SSH
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+
+    - name: Esperar a que cloud-init termine (evita el lock de apt)
+      ansible.builtin.command: cloud-init status --wait
+      changed_when: false
+
+    - name: Recolectar facts
+      ansible.builtin.setup:
+
+    # ---------------- Paquetes ----------------
+    - name: Instalar nginx y ufw
+      ansible.builtin.apt:
+        name: [nginx, ufw]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    # ---------------- Hardening SSH ----------------
+    - name: Deshabilitar login por password y root por SSH
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/99-hardening.conf
+        content: |
+          PasswordAuthentication no
+          PermitRootLogin no
+        mode: "0644"
+      notify: Reiniciar ssh
+
+    # ---------------- Firewall del host ----------------
+    - name: Politica por defecto de entrada = deny
+      community.general.ufw:
+        default: deny
+        direction: incoming
+
+    - name: Abrir puertos definidos en el codigo
+      community.general.ufw:
+        rule: allow
+        port: "{{ item | string }}"
+        proto: tcp
+      loop: "{{ firewall_allowed_ports }}"
+
+    - name: Activar UFW
+      community.general.ufw:
+        state: enabled
+
+    # ---------------- Servicio web ----------------
+    - name: Publicar pagina con info del despliegue
+      ansible.builtin.template:
+        src: templates/index.html.j2
+        dest: /var/www/html/index.html
+        mode: "0644"
+
+    - name: Nginx activo y habilitado
+      ansible.builtin.service:
+        name: nginx
+        state: started
+        enabled: true
+
+  handlers:
+    - name: Reiniciar ssh
+      ansible.builtin.service:
+        name: ssh
+        state: restarted

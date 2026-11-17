@@ -1,0 +1,8 @@
+# Valores por defecto. El pipeline sobreescribe firewall_allowed_ports
+# con la salida "open_ports" de OpenTofu, asi el firewall del host (UFW)
+# queda siempre igual al Security Group (defensa en profundidad).
+firewall_allowed_ports:
+  - 22
+  - 80
+
+git_sha: "local"
