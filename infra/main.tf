@@ -11,7 +11,8 @@ resource "docker_network" "net" {
   internal = each.value.internal
 
   ipam_config {
-    subnet = each.value.subnet
+    subnet  = each.value.subnet
+    gateway = cidrhost(each.value.subnet, 1)
   }
 
   labels {
@@ -63,7 +64,7 @@ resource "docker_container" "web" {
   restart  = "unless-stopped"
 
   capabilities {
-    add = ["NET_ADMIN"] # necesario para que Ansible configure iptables
+    add = ["CAP_NET_ADMIN"] # necesario para que Ansible configure iptables
   }
 
   networks_advanced {
