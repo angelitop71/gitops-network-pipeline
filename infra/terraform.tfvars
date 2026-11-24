@@ -28,8 +28,8 @@ firewall_rules = {
   }
   # DEMO: descomentar en un Pull Request para abrir un nuevo servicio
    app = {
-  #   port      = 8080
-  #   host_port = 9001 # web-1 -> localhost:9001, web-2 -> localhost:9002
-  #   source    = "0.0.0.0/0"
-  # }
+     port      = 8080
+     host_port = 9001 # web-1 -> localhost:9001, web-2 -> localhost:9002
+     source    = "0.0.0.0/0"
+   }
 }
